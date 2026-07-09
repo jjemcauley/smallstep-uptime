@@ -51,8 +51,10 @@ jobs:
           CODE: ${{ steps.probe.outputs.code }}
         run: |
           send() {
+            # Fail the run if Telegram rejects the message — a green run must
+            # mean the alert was actually delivered.
             curl -s -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-              -d chat_id="$TG_CHAT" -d text="$1" >/dev/null
+              -d chat_id="$TG_CHAT" -d text="$1" | grep -q '"ok":true'
           }
           issue=$(gh issue list -R "$GITHUB_REPOSITORY" --label outage --state open \
                     --json number --jq '.[0].number // empty')
