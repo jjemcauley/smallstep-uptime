@@ -1,0 +1,88 @@
+name: uptime probe
+
+# Off-box probe of the smallstep box's public front door. Runs on GitHub's
+# infrastructure so a box-side network blackout (when ALL on-box alerting is
+# blind) still produces a Telegram alert. State = the open "outage" issue:
+# alert once on down, once on recovery — no spam in between.
+#
+# GitHub cron is best-effort: */5 in practice fires every ~5–15 min. Fine —
+# this exists to catch multi-hour blackouts, not blips.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      url:
+        description: Override probe URL (test the alert path with a known-dead URL)
+        required: false
+
+permissions:
+  issues: write
+  contents: write # keepalive commit
+
+concurrency: probe
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      URL: ${{ inputs.url || 'https://suite.mwprogram.com/login' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Probe (3 attempts, 20s apart)
+        id: probe
+        run: |
+          up=false code=000
+          for i in 1 2 3; do
+            code=$(curl -sL -o /dev/null -w '%{http_code}' --max-time 25 "$URL" || echo 000)
+            echo "attempt $i: HTTP $code"
+            if [ "${code:0:1}" = 2 ]; then up=true; break; fi
+            [ "$i" -lt 3 ] && sleep 20
+          done
+          echo "up=$up"   >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Reconcile outage state + alert Telegram
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          UP: ${{ steps.probe.outputs.up }}
+          CODE: ${{ steps.probe.outputs.code }}
+        run: |
+          send() {
+            curl -s -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              -d chat_id="$TG_CHAT" -d text="$1" >/dev/null
+          }
+          issue=$(gh issue list -R "$GITHUB_REPOSITORY" --label outage --state open \
+                    --json number --jq '.[0].number // empty')
+          if [ "$UP" = true ]; then
+            if [ -n "$issue" ]; then
+              send "✅ RECOVERED: $URL reachable again from GitHub (HTTP $CODE)."
+              gh issue close "$issue" -R "$GITHUB_REPOSITORY" \
+                -c "Recovered: HTTP $CODE at $(date -u +%FT%TZ)."
+            fi
+          else
+            if [ -z "$issue" ]; then
+              send "🔴 DOWN: $URL unreachable from GitHub (HTTP $CODE after 3 attempts). If Telegram's on-box alerts are also silent, suspect a network blackout or power event."
+              gh issue create -R "$GITHUB_REPOSITORY" --label outage \
+                --title "outage: $URL unreachable" \
+                --body "First failed probe: $(date -u +%FT%TZ), HTTP $CODE after 3 attempts. This issue auto-closes on recovery."
+            fi
+          fi
+
+      # GitHub disables schedules in repos with no commit activity for 60 days.
+      - name: Keepalive commit when repo idle > 50 days
+        if: github.event_name == 'schedule'
+        run: |
+          gh repo clone "$GITHUB_REPOSITORY" repo -- --depth 1
+          cd repo
+          last=$(git log -1 --format=%ct)
+          age_days=$(( ( $(date +%s) - last ) / 86400 ))
+          echo "last commit ${age_days}d ago"
+          if [ "$age_days" -ge 50 ]; then
+            git config user.name "uptime-probe"
+            git config user.email "actions@github.com"
+            git commit --allow-empty -m "keepalive (schedules disable after 60d idle)"
+            git push
+          fi
