@@ -13,6 +13,9 @@ infrastructure and messages the existing Telegram alert bot on state changes.
   down-state — no spam while an outage is ongoing.
 - Test the alert path: run the workflow manually (Actions → uptime probe →
   Run workflow) with a known-dead URL override, then again with no override.
+- Keepalive: GitHub disables cron in repos idle > 60 days, so the run pushes an
+  empty commit once the last commit is > 50 days old. Test that push path with
+  the `keepalive` checkbox on a manual run.
 
 Secrets (repo Actions secrets): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — same bot
 as the box's monitoring stack (values live in the box's gitignored monitoring `.env`).

@@ -16,6 +16,10 @@ on:
       url:
         description: Override probe URL (test the alert path with a known-dead URL)
         required: false
+      keepalive:
+        description: Force the keepalive commit now (tests the push path)
+        type: boolean
+        default: false
 
 permissions:
   issues: write
@@ -74,15 +78,21 @@ jobs:
           fi
 
       # GitHub disables schedules in repos with no commit activity for 60 days.
+      # `gh auth setup-git` wires git's credential helper to GH_TOKEN — without it
+      # `git push` has no credentials and dies with exit 128 (broke every run
+      # 2026-08-29 → 2026-09-01, the first time the 50-day branch was reached).
       - name: Keepalive commit when repo idle > 50 days
-        if: github.event_name == 'schedule'
+        if: github.event_name == 'schedule' || inputs.keepalive
+        env:
+          FORCE: ${{ inputs.keepalive || 'false' }}
         run: |
+          gh auth setup-git
           gh repo clone "$GITHUB_REPOSITORY" repo -- --depth 1
           cd repo
           last=$(git log -1 --format=%ct)
           age_days=$(( ( $(date +%s) - last ) / 86400 ))
-          echo "last commit ${age_days}d ago"
-          if [ "$age_days" -ge 50 ]; then
+          echo "last commit ${age_days}d ago (force=$FORCE)"
+          if [ "$age_days" -ge 50 ] || [ "$FORCE" = true ]; then
             git config user.name "uptime-probe"
             git config user.email "actions@github.com"
             git commit --allow-empty -m "keepalive (schedules disable after 60d idle)"
